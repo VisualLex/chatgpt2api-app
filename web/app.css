@@ -1,0 +1,53 @@
+:root{
+  color-scheme:dark;
+  --shell-bg:#0b1118;--shell-surface:#111b26;--shell-ink:#dce6f0;--shell-muted:#91a3b8;--shell-line:#253241;
+  --shell-input:#0d1722;--shell-accent:#55d9b0;--shell-on-accent:#071c16;--shell-focus:#55d9b0;
+  --shell-danger:#ff9f9a;--shell-danger-bg:#352329;--shell-toolbar:#0d1722;--shell-toolbar-ink:#b2c4d5;
+  --shell-shadow:#0003;
+  font-family:system-ui,-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;
+  color:var(--shell-ink);background:var(--shell-bg);font-synthesis:none
+}
+:root[data-c2a-theme=light]{
+  color-scheme:light;
+  --shell-bg:#f5f7fb;--shell-surface:#fff;--shell-ink:#1b2740;--shell-muted:#71819b;--shell-line:#e0e7f1;
+  --shell-input:#fff;--shell-accent:#3569ed;--shell-on-accent:#fff;--shell-focus:#9bbafb;
+  --shell-danger:#9d3329;--shell-danger-bg:#fff0ed;--shell-toolbar:#1b2c4c;--shell-toolbar-ink:#e6edfb;
+  --shell-shadow:#1b376012
+}
+*{box-sizing:border-box}
+html,body,#root{height:100%;margin:0}
+body{min-width:320px}
+button,input{font:inherit}
+button{cursor:pointer}
+button:disabled{cursor:default;opacity:.55}
+button:focus-visible,input:focus-visible{outline:2px solid var(--shell-focus);outline-offset:3px}
+.initial-message{padding:24px}
+.entry-page,.runtime-page{display:grid;place-items:center;min-height:100%;padding:28px}
+.entry-card,.runtime-card{background:var(--shell-surface);border:1px solid var(--shell-line);border-radius:20px;box-shadow:0 12px 48px var(--shell-shadow);padding:36px;width:min(100%,560px)}
+.entry-mark{width:48px;height:48px;display:grid;place-items:center}
+.entry-card h1,.runtime-card h1{font-size:25px;letter-spacing:-.5px;margin:18px 0 12px}
+.entry-card p,.runtime-card p{line-height:1.7;font-size:14px}
+.entry-card form{display:grid;gap:10px;margin-top:24px}
+.entry-card label{font-size:13px;font-weight:650}
+.entry-card input{width:100%;padding:12px;border:1px solid var(--shell-line);background:var(--shell-input);color:var(--shell-ink);border-radius:9px}
+.entry-card button,.runtime-card button{color:var(--shell-on-accent);background:var(--shell-accent);border:0;border-radius:9px;padding:12px 18px;font-size:14px}
+.entry-note{color:var(--shell-muted);font-size:12px!important}
+.shell-error{color:var(--shell-danger);background:var(--shell-danger-bg);padding:12px 16px;border-radius:8px;word-break:break-word;white-space:pre-wrap;margin:12px 18px}
+.entry-card .shell-error,.runtime-card .shell-error{margin:16px 0}
+.standalone-shell{height:100%;display:flex;flex-direction:column}
+.shell-toolbar{display:flex;gap:12px;align-items:center;justify-content:space-between;background:var(--shell-toolbar);color:var(--shell-toolbar-ink);border-bottom:1px solid var(--shell-line);min-height:42px;padding:8px 24px;font-size:12px;flex-shrink:0}
+.shell-toolbar>div{display:flex;align-items:center;gap:9px}
+.shell-toolbar strong{font-weight:600}
+.shell-toolbar button{background:#ffffff08;color:inherit;border:1px solid #ffffff24;border-radius:6px;padding:4px 9px;font-size:11px;white-space:nowrap}
+.shell-session{color:#91a8be;margin-left:7px}
+.shell-status-dot{width:7px;height:7px;border-radius:50%;background:#f1bf6a;display:inline-block}
+.shell-status-dot.ready{background:#65d9a0;box-shadow:0 0 7px #65d9a030}
+.shell-status-dot.failed{background:#ff8f80}
+.dashboard-host{flex:1;min-height:0;overflow:hidden;display:flex}
+.runtime-page{min-height:0;overflow:auto;flex:1}
+.runtime-card{width:min(100%,700px)}
+.runtime-kicker{color:var(--shell-accent);font-size:12px!important;font-weight:700}
+.runtime-paths{border-top:1px solid var(--shell-line);margin-top:24px;padding-top:14px;font-size:12px}
+.runtime-paths dt{color:var(--shell-muted);margin-top:12px}
+.runtime-paths dd{margin:4px 0;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;overflow-wrap:anywhere}
+@media(max-width:600px){.shell-toolbar{padding:8px 12px}.shell-session{display:none}.entry-page,.runtime-page{padding:16px}.entry-card,.runtime-card{padding:24px}.entry-card h1,.runtime-card h1{font-size:22px}}

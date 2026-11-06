@@ -1,0 +1,22 @@
+node_modules/
+
+# Local configuration and runtime data
+.env
+.env.*
+!.env.example
+!.env.*.example
+.chatgpt2api/
+admin-key
+pending-credentials.enc.json
+*.log
+*.pid
+
+# Python environments and caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+
+# Operating system files
+.DS_Store
+Thumbs.db

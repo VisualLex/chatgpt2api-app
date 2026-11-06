@@ -1,0 +1,42 @@
+{
+  "name": "chatgpt2api-app",
+  "version": "0.6.2",
+  "type": "module",
+  "private": true,
+  "description": "Local ChatGPT account pool with browser management and an OpenAI-compatible API",
+  "main": "./lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./provider": "./lib/provider.js",
+    "./package.json": "./package.json",
+    "./windows-backend": "./lib/windows-backend.js",
+    "./credential-vault": "./lib/credential-vault.js",
+    "./platform-backend": "./lib/platform-backend.js"
+  },
+  "files": [
+    "lib",
+    "start.sh",
+    "start-windows.bat",
+    "README.md",
+    "scripts",
+    "types",
+    "LICENSE",
+    "web"
+  ],
+  "engines": {
+    "node": ">=20.11"
+  },
+  "scripts": {
+    "start": "node scripts/launch.mjs",
+    "help": "node scripts/launch.mjs --help",
+    "build": "node scripts/build.mjs",
+    "test": "node --test tests/*.test.mjs",
+    "status": "node scripts/manage-backend.mjs status",
+    "check": "node scripts/manage-backend.mjs check",
+    "repair": "node scripts/manage-backend.mjs repair",
+    "diagnose": "node scripts/manage-backend.mjs log"
+  },
+  "license": "MIT",
+  "homepage": "https://github.com/VisualLex/chatgpt2api-app"
+}
