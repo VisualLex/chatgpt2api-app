@@ -553,6 +553,28 @@ test('reference files survive failed generation and retry copies only registered
   assert.ok(await handler.execute({path:'/local/task-files/'+task.params.referenceFiles[0].id}),'deleting metadata does not delete image files');
 });
 
+test('image and GIF history keep only approved upstream failure reasons',async t=>{
+  const privateMessage=SECRET+' '+TOKEN+' https://private.test/image?signature=private-signature';
+  const cases=[
+    {type:'image',status:400,payload:{error:{code:'missing_reference_image',message:privateMessage}},expected:'缺少参考图片，请上传原图后重试，或改用纯文生图提示词。'},
+    {type:'gif',status:400,payload:{error:{code:'missing_reference_image',message:privateMessage}},expected:'缺少参考图片，请上传原图后重试，或改用纯文生图提示词。'},
+    {type:'image',status:502,payload:{error:{code:'empty_image_result',message:privateMessage}},expected:'上游未返回图片，请稍后重试。'},
+    {type:'image',status:400,payload:{detail:{error:{code:'content_policy_violation',message:privateMessage}}},expected:'上游以内容安全策略拒绝了本次生成，请调整提示词。'},
+    {type:'image',status:502,payload:{error:{code:'upstream_error',message:'ChatGPT 生图超时（已等待 120 秒）。'+privateMessage}},expected:'任务请求超时，请核对当前结果后再决定是否重试。'},
+    {type:'image',status:504,payload:{error:{code:'image_generation_timeout',message:privateMessage}},expected:'任务请求超时，请核对当前结果后再决定是否重试。'},
+    {type:'image',status:429,payload:{error:{type:'insufficient_quota',message:privateMessage}},expected:'当前账号没有可用额度，请检查号池。'},
+    {type:'image',status:502,payload:{error:{code:'unknown_private_code',message:privateMessage}},expected:'任务请求失败（HTTP 502），请检查运行日志。'}
+  ];
+  for(const [index,item] of cases.entries())await t.test(String(index),async t=>{
+    const {handler,taskHistory}=historyFixture(t,{fetcher:async()=>Response.json(item.payload,{status:item.status})});
+    const {task}=await submitHistory(handler,item.type,{prompt:'测试错误分类',model:'gpt-image-2.6'},'history-error-'+index);
+    await taskHistory.waitForIdle();
+    const failed=taskHistory.get(task.id);
+    assert.equal(failed.status,'failed');assert.equal(failed.error,item.expected);
+    assert.doesNotMatch(fs.readFileSync(taskHistory.filePath,'utf8'),/private-signature|private\.test|unknown_private_code|upstream_access_token|host-private-secret/);
+  });
+});
+
 test('invalid reference images fail preparation without calling upstream',async t=>{
   let calls=0;
   const {handler,taskHistory}=historyFixture(t,{fetcher:async()=>{calls++;throw Error('must not run')}});

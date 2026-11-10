@@ -369,6 +369,51 @@ class ApiHistoryTest(unittest.TestCase):
         self.assertEqual(task["params"]["model"], "[REDACTED]")
         self.assertIn("[图片数据已省略]", task["params"]["prompt"])
 
+    def test_known_json_errors_save_fixed_reasons_without_upstream_details(self):
+        private = "private-response-secret https://private.test/image?signature=private-signature"
+        cases = [
+            ({"error": {"code": "missing_reference_image", "message": private}}, 400, "缺少参考图片，请上传原图后重试，或改用纯文生图提示词。"),
+            ({"error": {"code": "empty_image_result", "message": private}}, 502, "上游未返回图片，请稍后重试。"),
+            ({"detail": {"error": {"code": "content_policy_violation", "message": private}}}, 400, "上游以内容安全策略拒绝了本次生成，请调整提示词。"),
+            ({"error": {"code": "upstream_error", "message": "ChatGPT 生图超时（已等待 120 秒）。" + private}}, 502, "任务请求超时，请核对当前结果后再决定是否重试。"),
+            ({"error": {"code": "image_generation_timeout", "message": private}}, 504, "任务请求超时，请核对当前结果后再决定是否重试。"),
+            ({"error": {"type": "insufficient_quota", "message": private}}, 429, "当前账号没有可用额度，请检查号池。"),
+            ({"detail": {"error": "no available image quota"}}, 429, "当前账号没有可用额度，请检查号池。"),
+            ({"error": {"code": "unknown_private_code", "message": private}}, 502, "API 请求失败（HTTP 502），请检查客户端响应。"),
+        ]
+        for payload, status, expected in cases:
+            with self.subTest(payload=payload):
+                before = {task["id"] for task in self.records()}
+                self.invoke(self.response_app(payload, status), path="/v1/images/generations")
+                task = next(task for task in self.records() if task["id"] not in before)
+                self.assertEqual(task["status"], "failed")
+                self.assertEqual(task["error"], expected)
+                for value in ("private-response-secret", "private.test", "private-signature", "unknown_private_code"):
+                    self.assertNotIn(value, json.dumps(task))
+
+    def test_split_stream_errors_save_fixed_reasons_and_preserve_response(self):
+        for path, payload in [
+            ("/v1/images/generations", {"error": {"code": "missing_reference_image", "message": "private-response-secret"}}),
+            ("/v1/responses", {"type": "response.failed", "response": {"error": {"code": "missing_reference_image", "message": "private-response-secret"}}}),
+        ]:
+            with self.subTest(path=path):
+                before = {task["id"] for task in self.records()}
+                wire = b"data: " + json.dumps(payload).encode() + b"\n\n"
+
+                async def application(scope, receive, send):
+                    await receive()
+                    await send({"type": "http.response.start", "status": 200, "headers": [(b"content-type", b"text/event-stream")]})
+                    for chunk in (wire[:21], wire[21:]):
+                        await send({"type": "http.response.body", "body": chunk, "more_body": True})
+                    await send({"type": "http.response.body", "body": b""})
+
+                response = self.invoke(module.RecordApiRequests(application), path=path)
+                self.assertEqual(b"".join(item.get("body", b"") for item in response), wire)
+                task = next(task for task in self.records() if task["id"] not in before)
+                self.assertEqual(task["status"], "failed")
+                self.assertEqual(task["error"], "缺少参考图片，请上传原图后重试，或改用纯文生图提示词。")
+                self.assertNotIn("private-response-secret", json.dumps(task))
+
     def test_multipart_captures_text_without_image_upload(self):
         body = (b'--history-boundary\r\nContent-Disposition: form-data; name="prompt"\r\n\r\npaint a lake\r\n'
                 b'--history-boundary\r\nContent-Disposition: form-data; name="model"\r\n\r\ngpt-image-2\r\n'

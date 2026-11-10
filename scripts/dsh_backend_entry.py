@@ -282,6 +282,44 @@ def numeric_usage(value, depth=0):
     return result
 
 
+PUBLIC_API_ERRORS = {
+    "missing_reference_image": "缺少参考图片，请上传原图后重试，或改用纯文生图提示词。",
+    "empty_image_result": "上游未返回图片，请稍后重试。",
+    "content_policy_violation": "上游以内容安全策略拒绝了本次生成，请调整提示词。",
+    "image_generation_timeout": "任务请求超时，请核对当前结果后再决定是否重试。",
+    "request_timeout": "任务请求超时，请核对当前结果后再决定是否重试。",
+    "insufficient_quota": "当前账号没有可用额度，请检查号池。",
+    "quota_exceeded": "当前账号没有可用额度，请检查号池。",
+    "rate_limit_exceeded": "上游请求被限流，请稍后重试。",
+    "rate_limit_error": "上游请求被限流，请稍后重试。",
+    "invalid_api_key": "接口认证失败，请检查 API 密钥。",
+}
+
+
+def public_api_error(value):
+    # Never persist arbitrary upstream messages, even for recognized error codes.
+    for _ in range(4):
+        if not isinstance(value, dict):
+            break
+        for key in ("code", "type"):
+            code = value.get(key)
+            if isinstance(code, str) and code in PUBLIC_API_ERRORS:
+                return PUBLIC_API_ERRORS[code]
+        nested = value.get("error", value.get("detail"))
+        if nested is None:
+            break
+        value = nested
+    message = value if isinstance(value, str) else value.get("message", "") if isinstance(value, dict) else ""
+    if not isinstance(message, str):
+        return ""
+    if (re.match(r"^(?:ChatGPT 生图超时（已等待 \d+(?:\.\d+)? 秒）|图片生成流已超过硬上限 \d+ 秒)", message)
+            or message.strip().lower() == "upstream connection timed out, please retry later"):
+        return PUBLIC_API_ERRORS["image_generation_timeout"]
+    if message.strip().lower() in ("no available image quota", "quota exceeded"):
+        return PUBLIC_API_ERRORS["insufficient_quota"]
+    return ""
+
+
 class ResponseSummary:
     def __init__(self, images=None, image_response=False):
         self.bytes = 0
@@ -293,6 +331,7 @@ class ResponseSummary:
         self.event_overflow = False
         self.event_limit = MAX_EVENT_BYTES
         self.failed = False
+        self.error = ""
         self.incomplete = False
         self.terminal = False
         self.usage = {}
@@ -302,6 +341,8 @@ class ResponseSummary:
     def inspect(self, value, depth=0):
         if not isinstance(value, dict) or depth > 4:
             return
+        if not self.error:
+            self.error = public_api_error(value)
         if self.images and isinstance(value.get("data"), list):
             for item in value["data"]:
                 if isinstance(item, dict):
@@ -516,8 +557,9 @@ class RecordApiRequests:
                 status = "failed"
             elif summary.incomplete or not completed or summary.sse and not summary.terminal:
                 status = "interrupted"
+            failure_reason = summary.error or (f"API 请求失败（HTTP {http_status}），请检查客户端响应。" if http_status >= 400 else "API 请求失败，请检查客户端响应。")
             task.update(status=status, finishedAt=timestamp(), result={"httpStatus": http_status, "responseBytes": summary.bytes},
-                        error="请求已中断，结果未知；请核对客户端结果。" if status == "interrupted" else "API 请求失败，请检查客户端响应。" if status == "failed" else "")
+                        error="请求已中断，结果未知；请核对客户端结果。" if status == "interrupted" else failure_reason if status == "failed" else "")
             if summary.usage:
                 task["result"]["usage"] = summary.usage
             if summary.images:
