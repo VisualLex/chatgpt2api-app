@@ -669,6 +669,85 @@ test('account pagination reaches beyond 300 rows and changing page size resets t
   assert.equal(ui.flatten(tree).filter(node=>node?.type==='tbody')[0].children.length,20);
 });
 
+test('account status colors cover Chinese and English values and filters follow actual statuses',async()=>{
+  const statuses=[['正常','success'],['normal','success'],['active','success'],['ok','success'],[' NORMAL ','success'],['限流','warning'],['limited','warning'],['异常','danger'],['abnormal','danger'],['禁用','neutral'],['disabled','neutral'],['待检查','neutral']];
+  const {ui,replaceItems}=await poolFixture(0);
+  const items=statuses.map(([status],i)=>({ref:String(i+1).padStart(64,'0'),email:`status${i+1}@example.test`,status,quota:10}));
+  replaceItems(items);clickButton(ui,'刷新账号列表');await flushPanel();
+  const tree=setPageSize(ui,20);
+  statuses.forEach(([status,kind],i)=>{
+    const row=ui.find(tree,node=>node.type==='tr'&&ui.text(node).includes(items[i].email));
+    assert.ok(row,`missing account with status ${status}`);
+    const chip=ui.find(row,node=>node.type==='span'&&node.props.className?.split(/\s+/).includes('c2a-chip'));
+    assert.equal(ui.text(chip),status,'the original status text remains visible');
+    assert.ok(chip.props.className.split(/\s+/).includes(kind),`unexpected color for ${status}`);
+  });
+  const select=ui.find(tree,node=>node.type==='select'&&node.props['aria-label']==='账号状态');
+  assert.ok(select);
+  const options=ui.flatten(select).filter(node=>node?.type==='option').map(node=>node.props.value);
+  assert.deepEqual([...options].sort(),['',...new Set(statuses.map(([status])=>status.trim().toLowerCase()))].sort());
+  setTaskField(ui,'账号状态','normal');
+  assert.equal(ui.flatten(ui.render()).find(node=>node?.type==='tbody').children.length,2,'case and surrounding spaces do not split a status');
+  setTaskField(ui,'账号状态','待检查');
+  replaceItems(items.filter(item=>item.status!=='待检查'));clickButton(ui,'刷新账号列表');await flushPanel();
+  const empty=ui.render(),selected=ui.find(empty,node=>node.type==='select'&&node.props['aria-label']==='账号状态');
+  assert.equal(selected.props.value,'待检查');
+  assert.ok(ui.find(selected,node=>node.type==='option'&&node.props.value==='待检查'),'refreshing keeps the active filter available');
+  assert.match(ui.text(empty),/没有符合当前状态的账号。/);
+});
+
+test('account status filtering precedes pagination and reconciles selection, deletion, and refresh',async()=>{
+  const {ui,replaceItems}=await poolFixture(35);
+  const items=Array.from({length:35},(_,i)=>({ref:String(i+1).padStart(64,'0'),email:`account${i+1}@example.test`,type:'free',status:i<13?'normal':'limited',quota:10}));
+  replaceItems(items);clickButton(ui,'刷新账号列表');await flushPanel();
+  clickButton(ui,'4');setCheckbox(ui,'选择账号 account35@example.test');
+  let tree=setTaskField(ui,'账号状态','normal');
+  assert.match(ui.text(tree),/1–10 条/);
+  assert.match(ui.text(tree),/account1@example.test/);
+  assert.doesNotMatch(ui.text(tree),/account35@example.test/);
+  assert.equal(findButton(ui,'上一页').props.disabled,true);
+  setCheckbox(ui,'选择本页全部账号');
+  assert.ok(findButton(ui,'批量删除（11）'),'selection from another filter is retained');
+  tree=setTaskField(ui,'账号状态','limited');
+  const pagination=ui.find(tree,node=>node.props.className==='c2a-pagination');
+  assert.match(ui.text(pagination),/22/);
+  assert.match(ui.text(pagination),/35/);
+  assert.match(ui.text(pagination),/1–10 条/);
+  assert.match(ui.text(tree),/account14@example.test/);
+  assert.doesNotMatch(ui.text(tree),/account1@example.test/);
+  setCheckbox(ui,'选择本页全部账号');
+  assert.ok(findButton(ui,'批量删除（21）'),'select-all only adds the ten filtered rows on this page');
+  setCheckbox(ui,'选择本页全部账号',false);
+  assert.ok(findButton(ui,'批量删除（11）'),'deselect-all preserves hidden selections');
+  tree=clickButton(ui,'3');
+  assert.match(ui.text(tree),/21–22 条/);
+  assert.match(ui.text(tree),/account35@example.test/);
+  clickButton(ui,'清空选择');setCheckbox(ui,'选择本页全部账号');
+  await findButton(ui,'批量删除（2）').props.onClick();
+  tree=ui.render();
+  assert.match(ui.text(tree),/11–20 条/);
+  assert.match(ui.text(tree),/account24@example.test/);
+  assert.doesNotMatch(ui.text(tree),/account34@example.test|account35@example.test/);
+  assert.equal(findButton(ui,'下一页').props.disabled,true);
+  replaceItems(items.slice(0,33).map((item,i)=>({...item,status:i<31?'normal':'limited'})));
+  clickButton(ui,'刷新账号列表');await flushPanel();
+  tree=ui.render();
+  assert.match(ui.text(tree),/1–2 条/);
+  assert.equal(ui.flatten(tree).find(node=>node?.type==='tbody').children.length,2);
+  assert.equal(findButton(ui,'上一页').props.disabled,true);
+  assert.equal(findButton(ui,'下一页').props.disabled,true);
+  replaceItems(items.slice(0,33).map(item=>({...item,status:'normal'})));
+  clickButton(ui,'刷新账号列表');await flushPanel();
+  tree=ui.render();
+  assert.match(ui.text(tree),/没有符合当前状态的账号。/);
+  assert.match(ui.text(tree),/0–0 条/);
+  assert.equal(findButton(ui,'上一页').props.disabled,true);
+  assert.equal(findButton(ui,'下一页').props.disabled,true);
+  tree=setTaskField(ui,'账号状态','');
+  assert.match(ui.text(tree),/共 33 个账号 · 1–10 条/);
+  assert.match(ui.text(tree),/account1@example.test/);
+});
+
 test('selection spans pages and page select-all only affects the visible page',async()=>{
   const {ui}=await poolFixture(25);
   setCheckbox(ui,'选择账号 account1@example.test');

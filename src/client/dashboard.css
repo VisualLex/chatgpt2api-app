@@ -77,6 +77,8 @@
 .c2a-card-head{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;margin-bottom:13px}
 .c2a-card .c2a-card-head h3{margin:0}
 .c2a-card-actions{display:flex;align-items:center;flex-wrap:wrap;gap:8px}
+.c2a-account-filter{display:flex;align-items:center;gap:8px;color:var(--muted);font-size:12px;white-space:nowrap}
+.c2a-account-filter select{padding:7px 10px;border:1px solid var(--control-line);border-radius:9px;background:var(--surface);color:var(--ink);font:inherit}
 .c2a-checkcell{width:36px;text-align:center!important}
 .c2a-checkcell input{width:16px;height:16px;margin:0;vertical-align:middle;accent-color:var(--blue);cursor:pointer}
 .c2a-checkcell input:disabled{cursor:default}

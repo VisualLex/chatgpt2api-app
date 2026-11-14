@@ -24,6 +24,7 @@ function createChatGPT2APIDashboard(React, STYLES, options = {}) {
   const PAGES=[['overview','总览','▣'],['accounts','号池管理','◉'],['api','API 接入','⇄'],['image','图片生成','▧'],['history','历史任务','◷'],['advanced','高级导入','⚙'],['settings',text('插件设置','运行设置'),'≡']];
   const TASK_TYPES={image:'图片生成',gif:'GIF 动画',authorize:'账号授权',quota:'额度刷新',api_request:'API 请求'};
   const TASK_STATUSES={queued:'排队中',running:'进行中',succeeded:'成功',partial:'部分成功',failed:'失败',interrupted:'已中断 / 结果未知'};
+  const ACCOUNT_STATUS_KINDS={正常:'success',normal:'success',active:'success',ok:'success',限流:'warning',limited:'warning',异常:'danger',abnormal:'danger',禁用:'neutral',disabled:'neutral'};
   const taskFinished=task=>!['queued','running'].includes(task?.status);
   const taskKind=task=>task?.status==='succeeded'?'success':['failed','interrupted'].includes(task?.status)?'danger':task?.status==='partial'?'warning':'neutral';
   const requestId=()=>globalThis.crypto?.randomUUID?.()||`ui-${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -87,6 +88,7 @@ function createChatGPT2APIDashboard(React, STYLES, options = {}) {
   function number(v){const n=Number(v);return Number.isFinite(n)?n.toLocaleString('zh-CN'):'—'}
   function maskToken(v){if(typeof v!=='string'||!v)return '—';return v.slice(0,5)+'••••'+v.slice(-4)}
   function accountToken(a){return String(a?.ref||'')}
+  function accountStatus(a){return String(a?.status||'—').trim().toLowerCase()||'—'}
   function copyToClipboard(text, onSuccess){
     if(!text)return;
     function fallback(){
@@ -230,6 +232,7 @@ function createChatGPT2APIDashboard(React, STYLES, options = {}) {
     const [accountSelection,setAccountSelection]=usePanelState('accountSelection',[]);
     const [accountPage,setAccountPage]=usePanelState('accountPage',1);
     const [accountPageSize,setAccountPageSize]=usePanelState('accountPageSize',10);
+    const [accountStatusFilter,setAccountStatusFilter]=usePanelState('accountStatusFilter','');
     const [newToken,setNewToken]=usePanelState('newToken','');
     const [credentialText,setCredentialText]=usePanelState('credentialText','');
     const [credentialItems,setCredentialItems]=usePanelState('credentialItems',[]);
@@ -307,10 +310,12 @@ function createChatGPT2APIDashboard(React, STYLES, options = {}) {
     const accountRefs=new Set(pool.items.map(accountToken).filter(Boolean));
     const selectedAccountRefs=accountSelection.filter(ref=>accountRefs.has(ref));
     const selectedAccountSet=new Set(selectedAccountRefs);
-    const accountPageCount=Math.max(1,Math.ceil(pool.items.length/accountPageSize));
+    const accountStatuses=[...new Set([...pool.items.map(accountStatus),...(accountStatusFilter?[accountStatusFilter]:[])])];
+    const filteredAccounts=pool.items.filter(a=>!accountStatusFilter||accountStatus(a)===accountStatusFilter);
+    const accountPageCount=Math.max(1,Math.ceil(filteredAccounts.length/accountPageSize));
     const currentAccountPage=Math.min(accountPageCount,Math.max(1,accountPage));
     const accountPageStart=(currentAccountPage-1)*accountPageSize;
-    const visibleAccounts=pool.items.slice(accountPageStart,accountPageStart+accountPageSize);
+    const visibleAccounts=filteredAccounts.slice(accountPageStart,accountPageStart+accountPageSize);
     const visibleAccountRefs=visibleAccounts.map(accountToken).filter(Boolean);
     const allPageAccountsSelected=visibleAccountRefs.length>0&&visibleAccountRefs.every(ref=>selectedAccountSet.has(ref));
     const somePageAccountsSelected=visibleAccountRefs.some(ref=>selectedAccountSet.has(ref));
@@ -784,7 +789,9 @@ function createChatGPT2APIDashboard(React, STYLES, options = {}) {
         const refs=new Set(items.map(accountToken).filter(Boolean));
         setPool(x=>({...x,loading:false,loaded:true,items,error:'',message:silent?x.message:'已更新账号列表'}));
         setAccountSelection(prev=>prev.filter(ref=>refs.has(ref)));
-        setAccountPage(page=>Math.min(page,Math.max(1,Math.ceil(items.length/(panelStore.get('accountPageSize')||10)))));
+        const statusFilter=panelStore.get('accountStatusFilter');
+        const count=statusFilter?items.filter(a=>accountStatus(a)===statusFilter).length:items.length;
+        setAccountPage(page=>Math.min(page,Math.max(1,Math.ceil(count/(panelStore.get('accountPageSize')||10)))));
         if(silent)refreshInBackground();else reload();
       }catch(e){if(revision===accountListRevision)setPool(x=>({...x,loading:false,error:shortError(e)}))}
     }
@@ -875,7 +882,7 @@ function createChatGPT2APIDashboard(React, STYLES, options = {}) {
     }
     async function deleteSelectedAccounts(){
       if(!selectedAccountRefs.length||panelStore.get('doing'))return;
-      if(!globalThis.confirm?.(`确认从号池中删除已选的 ${selectedAccountRefs.length} 个账号？包含其他分页中勾选的账号。此操作无法撤销，请确认已备份需要保留的凭据。`))return;
+      if(!globalThis.confirm?.(`确认从号池中删除已选的 ${selectedAccountRefs.length} 个账号？包含其他分页及当前筛选外勾选的账号。此操作无法撤销，请确认已备份需要保留的凭据。`))return;
       await removeAccountRefs(selectedAccountRefs,true);
     }
     async function removeAccountRefs(refs,batch=false){
@@ -1066,21 +1073,22 @@ function createChatGPT2APIDashboard(React, STYLES, options = {}) {
           credentialBusy&&accountDialog!=='import'&&accountDialog!=='pending'?
             h('div',{className:'c2a-task-notice',role:'status'},h('span',null,'账号授权正在后台执行…'),h(Btn,{onClick:()=>openAccountDialog('pending')},'查看进度')):null,
             h(Card,{title:`可用 Token 号池（${pool.items.length}）`,actions:h('div',{className:'c2a-card-actions'},
+              h('label',{className:'c2a-account-filter'},'账号状态',h('select',{'aria-label':'账号状态',value:accountStatusFilter,disabled:doing||pool.loading,onChange:e=>{setAccountStatusFilter(e.target.value);changeAccountPage(1)}},h('option',{value:''},'全部状态'),...accountStatuses.map(status=>h('option',{key:status,value:status},status)))),
               h(Btn,{onClick:deleteSelectedAccounts,danger:true,disabled:doing||pool.loading||!selectedAccountRefs.length},`批量删除（${selectedAccountRefs.length}）`),
               h(Btn,{onClick:refreshAllAccounts,disabled:doing||!pool.items.length},doing?'正在刷新…':'刷新全部额度'))},
-              selectedAccountRefs.length?h('div',{className:'c2a-selection-bar'},h('span',{role:'status'},`已选 ${selectedAccountRefs.length} 个账号（跨页保留）`),h(Btn,{onClick:()=>setAccountSelection([]),disabled:doing||pool.loading},'清空选择')):null,
-              pool.items.length?h('div',{className:'c2a-tablewrap c2a-account-tablewrap'},h('table',{className:'c2a-table'},h('thead',null,h('tr',null,
+              selectedAccountRefs.length?h('div',{className:'c2a-selection-bar'},h('span',{role:'status'},`已选 ${selectedAccountRefs.length} 个账号（跨页、跨筛选保留）`),h(Btn,{onClick:()=>setAccountSelection([]),disabled:doing||pool.loading},'清空选择')):null,
+              filteredAccounts.length?h('div',{className:'c2a-tablewrap c2a-account-tablewrap'},h('table',{className:'c2a-table'},h('thead',null,h('tr',null,
                 h('th',{className:'c2a-checkcell'},h('input',{type:'checkbox',checked:allPageAccountsSelected,ref:node=>{if(node)node.indeterminate=!allPageAccountsSelected&&somePageAccountsSelected},'aria-checked':!allPageAccountsSelected&&somePageAccountsSelected?'mixed':allPageAccountsSelected,'aria-label':'选择本页全部账号',title:'仅选择或取消选择当前页',disabled:doing||pool.loading||!visibleAccountRefs.length,onChange:e=>selectAccountPage(e.target.checked)})),
                 ...['账号','类型','状态','剩余额度','操作'].map(t=>h('th',{key:t},t)))),h('tbody',null,...visibleAccounts.map((a,i)=>h('tr',{key:accountToken(a)||i,className:selectedAccountSet.has(accountToken(a))?'c2a-row-selected':''},
                 h('td',{className:'c2a-checkcell'},h('input',{type:'checkbox',checked:selectedAccountSet.has(accountToken(a)),'aria-label':`选择账号 ${a?.email||a?.name||('账号 '+(accountPageStart+i+1))}`,disabled:doing||pool.loading||!accountToken(a),onChange:e=>selectAccount(accountToken(a),e.target.checked)})),
                 h('td',null,h('strong',null,String(a?.email||a?.name||('账号 '+(accountPageStart+i+1)))),h('small',null,maskToken(accountToken(a)))),
                 h('td',null,String(a?.type||a?.plan||'—')),
-                h('td',null,h(Chip,{kind:['normal','active','ok'].includes(String(a?.status||'').toLowerCase())?'success':'neutral'},String(a?.status||'—'))),
+                h('td',null,h(Chip,{kind:ACCOUNT_STATUS_KINDS[accountStatus(a)]||'neutral'},String(a?.status||'—'))),
                 h('td',null,number(a?.quota??a?.image_quota),Number(a?.quota??a?.image_quota??0)===0?h('small',null,a?.quota_check_failed?'最近查询失败':'请核对网络/额度'):null),
                 h('td',null,h('div',{className:'c2a-rowactions'},h(Btn,{onClick:()=>refreshAccount(a),disabled:doing||pool.loading},'检测'),h(Btn,{onClick:()=>deleteAccount(a),danger:true,disabled:doing||pool.loading},'删除')))
-              ))))):h('div',{className:'c2a-emptymini'},'暂无账号，或尚未刷新列表。'),
+              ))))):h('div',{className:'c2a-emptymini'},accountStatusFilter?'没有符合当前状态的账号。':'暂无账号，或尚未刷新列表。'),
               h('div',{className:'c2a-pagination'},
-                h('span',null,`共 ${pool.items.length} 个账号 · ${pool.items.length?accountPageStart+1:0}–${Math.min(accountPageStart+accountPageSize,pool.items.length)} 条`),
+                h('span',null,`共 ${filteredAccounts.length} 个账号${accountStatusFilter?`（全部 ${pool.items.length} 个）`:''} · ${filteredAccounts.length?accountPageStart+1:0}–${Math.min(accountPageStart+accountPageSize,filteredAccounts.length)} 条`),
                 h('div',{className:'c2a-pagination-controls'},
                   h('label',null,'每页 ',h('select',{value:accountPageSize,'aria-label':'每页账号数',disabled:doing||pool.loading,onChange:e=>{setAccountPageSize(Number(e.target.value));changeAccountPage(1)}},...[10,20,50,100].map(size=>h('option',{key:size,value:size},`${size} 条`)))),
                   h(Btn,{onClick:()=>changeAccountPage(currentAccountPage-1),disabled:doing||pool.loading||currentAccountPage<=1},'上一页'),
