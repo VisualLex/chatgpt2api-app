@@ -1,4 +1,4 @@
-"""DSH-managed ASGI entrypoint: apply saved defaults to third-party image API calls.
+"""DSH-managed ASGI entrypoint: account recovery and saved image API defaults.
 
 This wraps the pinned upstream app without modifying upstream source files.
 Image defaults preserve explicit size and model. Public generation requests
@@ -20,6 +20,14 @@ from urllib.parse import unquote, urlsplit
 from uuid import uuid4
 
 from main import app as upstream_app
+
+if os.environ.get("DSH_ACCOUNT_RECOVERY_WORKER"):
+    from dsh_account_recovery import install_account_recovery
+    from services.account_service import account_service
+    from services.config import config
+    from services.log_service import log_service
+
+    install_account_recovery(account_service, config, log_service, os.environ["DSH_ACCOUNT_RECOVERY_WORKER"])
 
 PRESET_SIZES = {
     "1:1": {"1k": "1024x1024", "2k": "2048x2048", "4k": "4096x4096"},

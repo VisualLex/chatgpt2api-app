@@ -22,14 +22,14 @@ function createChatGPT2APIDashboard(React, STYLES, options = {}) {
   const PANEL='chatgpt2api-dashboard';
   const DEFAULT_URL=options.baseUrl||'http://127.0.0.1:38650';
   const PAGES=[['overview','总览','▣'],['accounts','号池管理','◉'],['api','API 接入','⇄'],['image','图片生成','▧'],['history','历史任务','◷'],['advanced','高级导入','⚙'],['settings',text('插件设置','运行设置'),'≡']];
-  const TASK_TYPES={image:'图片生成',gif:'GIF 动画',authorize:'账号授权',quota:'额度刷新',api_request:'API 请求'};
+  const TASK_TYPES={image:'图片生成',gif:'GIF 动画',authorize:'账号授权',quota:'额度刷新',relogin:'重新登录',api_request:'API 请求'};
   const TASK_STATUSES={queued:'排队中',running:'进行中',succeeded:'成功',partial:'部分成功',failed:'失败',interrupted:'已中断 / 结果未知'};
   const ACCOUNT_STATUS_KINDS={正常:'success',normal:'success',active:'success',ok:'success',限流:'warning',limited:'warning',异常:'danger',abnormal:'danger',禁用:'neutral',disabled:'neutral'};
   const taskFinished=task=>!['queued','running'].includes(task?.status);
   const taskKind=task=>task?.status==='succeeded'?'success':['failed','interrupted'].includes(task?.status)?'danger':task?.status==='partial'?'warning':'neutral';
   const requestId=()=>globalThis.crypto?.randomUUID?.()||`ui-${Date.now()}-${Math.random().toString(36).slice(2)}`;
   function taskDuration(task){const start=Date.parse(task?.startedAt||task?.createdAt),end=task?.finishedAt?Date.parse(task.finishedAt):Date.now();if(!Number.isFinite(start)||!Number.isFinite(end))return '—';const seconds=Math.max(0,Math.floor((end-start)/1000));return seconds<60?`${seconds} 秒`:`${Math.floor(seconds/60)} 分 ${seconds%60} 秒`}
-  function taskSummary(task){const r=task?.result||{},p=task?.progress||{};if(task?.type==='api_request')return (r.httpStatus?`HTTP ${r.httpStatus}`:TASK_STATUSES[task.status]||'等待结果')+(r.usage?.total_tokens!==undefined?` · ${r.usage.total_tokens} Token`:'');if(task?.type==='authorize')return r.total!==undefined?`成功 ${r.succeeded||0} · 失败 ${r.failed||0} · 跳过 ${(r.duplicates||0)+(r.enrolled?.skipped||0)}`+(r.invalid?` · 格式错误 ${r.invalid}`:''):'等待授权结果';if(task?.type==='quota')return `${r.processed??p.processed??0} / ${r.total??p.total??'—'} · 异常 ${r.errorCount??p.errorCount??0}`;return task?.status==='succeeded'?'生成完成':TASK_STATUSES[task?.status]||'等待结果'}
+  function taskSummary(task){const r=task?.result||{},p=task?.progress||{};if(task?.type==='api_request')return (r.httpStatus?`HTTP ${r.httpStatus}`:TASK_STATUSES[task.status]||'等待结果')+(r.usage?.total_tokens!==undefined?` · ${r.usage.total_tokens} Token`:'');if(task?.type==='authorize')return r.total!==undefined?`成功 ${r.succeeded||0} · 失败 ${r.failed||0} · 跳过 ${(r.duplicates||0)+(r.enrolled?.skipped||0)}`+(r.invalid?` · 格式错误 ${r.invalid}`:''):'等待授权结果';if(task?.type==='quota')return `${r.processed??p.processed??0} / ${r.total??p.total??'—'} · 异常 ${r.errorCount??p.errorCount??0}`;if(task?.type==='relogin')return `${r.processed??p.processed??0} / ${r.total??p.total??'—'} · 成功 ${r.succeeded??p.succeeded??0} · 失败 ${r.failed??p.failed??0} · 跳过 ${r.skipped??p.skipped??0}`;return task?.status==='succeeded'?'生成完成':TASK_STATUSES[task?.status]||'等待结果'}
   const MAX_FILE_SIZE=12*1024*1024;
   function urlClean(value){
     try{const u=new URL(String(value).trim());if(!['http:','https:'].includes(u.protocol)||u.username||u.password||u.pathname!=='/'||u.search||u.hash)return null;return u.origin}catch{return null}
@@ -241,6 +241,7 @@ function createChatGPT2APIDashboard(React, STYLES, options = {}) {
     const [credentialError,setCredentialError]=usePanelState('credentialError','');
     const [doing,setDoing]=usePanelState('doing',false);
     const [proxyState,setProxyState]=usePanelState('proxyState',{url:'',draft:'',configured:false,hasCredentials:false,busy:false,error:'',message:'',test:null});
+    const [accountRecovery,setAccountRecovery]=usePanelState('accountRecovery',{autoRecover:false,loaded:false,busy:false,error:'',message:''},x=>({...x,busy:false}));
     const [prompt,setPrompt]=usePanelState('prompt',DEFAULT_PROMPT);
     const [imageModels,setImageModels]=usePanelState('imageModels',{items:[],loading:false,error:''});
     const [imagePrefs,setImagePrefs]=usePanelState('imagePrefs',{defaultModel:'gpt-image-2',defaultImageTier:'auto',loaded:false,saving:false,error:'',message:''});
@@ -254,6 +255,7 @@ function createChatGPT2APIDashboard(React, STYLES, options = {}) {
     const [imageResult,setImageResult]=usePanelState('imageResult',{loading:false,url:'',error:''});
     const [credentialTaskId,setCredentialTaskId]=usePanelState('credentialTaskId','');
     const [quotaTaskId,setQuotaTaskId]=usePanelState('quotaTaskId','');
+    const [reloginTaskId,setReloginTaskId]=usePanelState('reloginTaskId','');
     const [taskFilters,setTaskFilters]=usePanelState('taskFilters',{type:'',status:'',from:'',to:''});
     const [taskHistory,setTaskHistory]=usePanelState('taskHistory',{items:[],total:0,page:1,pageSize:10,pageCount:1,loading:false,error:'',message:''});
     const [overviewTasks,setOverviewTasks]=usePanelState('overviewTasks',{items:[],loaded:false,loading:true,error:'',activeCount:null,countError:''});
@@ -391,7 +393,7 @@ function createChatGPT2APIDashboard(React, STYLES, options = {}) {
       void poll();return()=>{live=false;clearTimeout(timer)};
     },[tab,taskFilters.type,taskFilters.status,taskFilters.from,taskFilters.to,taskHistory.page,taskHistory.pageSize,historyDialogId]);
     useEffect(()=>{
-      const tracked=[imageResult.loading&&imageResult.taskId?['image',imageResult.taskId]:null,credentialTaskId?['authorize',credentialTaskId]:null,quotaTaskId?['quota',quotaTaskId]:null].filter(Boolean);
+      const tracked=[imageResult.loading&&imageResult.taskId?['image',imageResult.taskId]:null,credentialTaskId?['authorize',credentialTaskId]:null,quotaTaskId?['quota',quotaTaskId]:null,reloginTaskId?['relogin',reloginTaskId]:null].filter(Boolean);
       if(!tracked.length)return;
       let live=true,timer;
       const poll=async()=>{
@@ -402,7 +404,7 @@ function createChatGPT2APIDashboard(React, STYLES, options = {}) {
         if(live)timer=setTimeout(poll,2000);
       };
       void poll();return()=>{live=false;clearTimeout(timer)};
-    },[imageResult.loading?imageResult.taskId:'',credentialTaskId,quotaTaskId]);
+    },[imageResult.loading?imageResult.taskId:'',credentialTaskId,quotaTaskId,reloginTaskId]);
     async function submitTask(type,params){
       const response=await upstream('/local/tasks',{method:'POST',body:{type,params,requestId:requestId()},timeoutMs:45000});
       if(!response.task?.id)throw Error('任务提交未返回任务编号');
@@ -442,8 +444,14 @@ function createChatGPT2APIDashboard(React, STYLES, options = {}) {
       }else if(kind==='quota'){
         if(panelStore.get('quotaTaskId')!==task.id)return;
         if(!ended){setPool(x=>({...x,message:`额度刷新${TASK_STATUSES[task.status]||''}：${task.progress?.processed||0}/${task.progress?.total||'?'}…`}));return}
-        setQuotaTaskId('');await listAccounts();setDoing(false);
+        setQuotaTaskId('');await listAccounts();setDoing(!!panelStore.get('reloginTaskId'));
         setPool(x=>({...x,error:[task.error,x.error].filter(Boolean).join('；'),message:`额度刷新${TASK_STATUSES[task.status]||'已结束'}：处理 ${task.result?.processed??0}/${task.result?.total??'—'}，查询异常 ${task.result?.errorCount??0}。`}));
+      }else if(kind==='relogin'){
+        if(panelStore.get('reloginTaskId')!==task.id)return;
+        if(!ended){setPool(x=>({...x,message:`重新登录${TASK_STATUSES[task.status]||''}：${taskSummary(task)}…`}));return}
+        setReloginTaskId('');await listAccounts();setDoing(!!panelStore.get('quotaTaskId'));
+        const errors=(task.result?.errors||[]).slice(0,3).map(item=>item.error).filter(Boolean);
+        setPool(x=>({...x,error:[task.error,...errors,x.error].filter(Boolean).join('；'),message:`重新登录${TASK_STATUSES[task.status]||'已结束'}：${taskSummary(task)}。凭证更新后，相应账号的勾选会自动取消，请核对最新状态。`}));
       }
     }
     async function restoreActiveTasks(){
@@ -456,6 +464,8 @@ function createChatGPT2APIDashboard(React, STYLES, options = {}) {
         if(authorization&&!panelStore.get('credentialTaskId')){setCredentialTaskId(authorization.id);setCredentialBusy(true)}
         const quota=items.find(task=>task.type==='quota');
         if(quota&&!panelStore.get('quotaTaskId')){setQuotaTaskId(quota.id);setDoing(true)}
+        const relogin=items.find(task=>task.type==='relogin');
+        if(relogin&&!panelStore.get('reloginTaskId')){setReloginTaskId(relogin.id);setDoing(true)}
       }catch{/* Existing history remains queryable after the service reconnects. */}
     }
     async function restoreLastImageTask(){
@@ -501,16 +511,20 @@ function createChatGPT2APIDashboard(React, STYLES, options = {}) {
       }catch(e){if(revision===historyDetailRevision)setHistoryDetail(x=>({...x,loading:false,error:shortError(e)}))}
     }
     async function retryHistoryTask(task){
+      const accountTask=['quota','relogin'].includes(task.type);
+      if(panelStore.get('historyBusy')||(accountTask&&panelStore.get('doing')))return;
       if(!globalThis.confirm?.(task.type==='image'||task.type==='gif'?'确认创建新的生成任务？这会再次向上游发起请求。':'确认创建新任务并重试未成功的项目？'))return;
       setHistoryBusy(task.id);
+      if(accountTask)setDoing(true);
       try{
         const response=await upstream('/local/tasks/'+encodeURIComponent(task.id)+'/retry',{method:'POST',body:{requestId:requestId()},timeoutMs:45000});
         const next=response.task;
         if(['image','gif'].includes(next.type))setImageResult({loading:true,taskId:next.id,status:next.status,url:'',error:'',format:next.type==='gif'?'gif':'png'});
         else if(next.type==='authorize'){setCredentialTaskId(next.id);setCredentialBusy(true)}
         else if(next.type==='quota'){setQuotaTaskId(next.id);setDoing(true)}
+        else if(next.type==='relogin'){setReloginTaskId(next.id);setDoing(true)}
         await loadTaskHistory();openHistoryDetail(next.id);
-      }catch(e){const error=shortError(e);setTaskHistory(x=>({...x,error}));setHistoryDetail(x=>({...x,error}))}finally{setHistoryBusy('')}
+      }catch(e){const error=shortError(e);setTaskHistory(x=>({...x,error}));setHistoryDetail(x=>({...x,error}))}finally{setHistoryBusy('');if(accountTask)setDoing(!!panelStore.get('quotaTaskId')||!!panelStore.get('reloginTaskId'))}
     }
     async function deleteHistoryTask(task){
       if(!globalThis.confirm?.('确认删除这条历史记录？已生成的图片文件会保留。'))return;
@@ -565,13 +579,13 @@ function createChatGPT2APIDashboard(React, STYLES, options = {}) {
             task.result?.files?.length?h(React.Fragment,null,h('h4',null,'生成结果'),renderTaskFiles(task.result.files)):h('p',{className:'c2a-help'},taskFinished(task)?'没有可用的生成结果。':'任务正在后台执行，可关闭本窗口稍后查看。')
           ):h(React.Fragment,null,
             h('p',{className:'c2a-info'},taskSummary(task)),
-            task.type==='quota'&&Number(task.progress?.total)>0?h('progress',{className:'c2a-task-progress',max:task.progress.total,value:Math.min(task.progress.processed||0,task.progress.total),'aria-label':'账号额度刷新进度'}):null,
+            ['quota','relogin'].includes(task.type)&&Number(task.progress?.total)>0?h('progress',{className:'c2a-task-progress',max:task.progress.total,value:Math.min(task.progress.processed||0,task.progress.total),'aria-label':task.type==='relogin'?'账号重新登录进度':'账号额度刷新进度'}):null,
             task.result?.failures?.length?h('div',{className:'c2a-tablewrap'},h('table',{className:'c2a-table'},h('thead',null,h('tr',null,h('th',null,'账号'),h('th',null,'失败原因'))),h('tbody',null,...task.result.failures.map((failure,i)=>h('tr',{key:failure.id||i},h('td',null,failure.email||'—'),h('td',null,failure.error||'未返回具体原因')))))):null,
-            task.result?.errors?.length?h('ul',{className:'c2a-help'},...task.result.errors.map((error,i)=>h('li',{key:i},`第 ${error.line} 行：${error.reason}`))):null
+            task.result?.errors?.length?h('ul',{className:'c2a-help'},...task.result.errors.map((error,i)=>h('li',{key:i},task.type==='relogin'?error.error||'未返回具体原因':`第 ${error.line} 行：${error.reason}`))):null
           ),
           h('div',{className:'c2a-formrow c2a-task-detail-actions'},
             ['image','gif'].includes(task.type)?h(Btn,{onClick:()=>reuseImageTask(task),disabled:!!historyBusy},'沿用参数'):task.type!=='api_request'?h(Btn,{onClick:()=>changeTab('accounts')},'查看号池'):null,
-            task.type!=='api_request'&&['failed','partial','interrupted'].includes(task.status)&&(task.type!=='authorize'||task.result?.failures?.length||task.status==='interrupted')?h(Btn,{onClick:()=>retryHistoryTask(task),primary:true,disabled:!!historyBusy},task.type==='authorize'?'重试失败项':'创建重试任务'):null,
+            task.type!=='api_request'&&['failed','partial','interrupted'].includes(task.status)&&(task.type!=='authorize'||task.result?.failures?.length||task.status==='interrupted')?h(Btn,{onClick:()=>retryHistoryTask(task),primary:true,disabled:!!historyBusy||(['quota','relogin'].includes(task.type)&&doing)},task.type==='authorize'?'重试失败项':'创建重试任务'):null,
             h(Btn,{onClick:()=>loadHistoryDetail(task.id),disabled:historyDetail.loading},'刷新详情'),
             h(Btn,{onClick:()=>deleteHistoryTask(task),danger:true,disabled:!!historyBusy||!taskFinished(task)},'删除记录')
           )
@@ -622,7 +636,7 @@ function createChatGPT2APIDashboard(React, STYLES, options = {}) {
       // returning panel shows its previous content and then updates in place
       // instead of flashing "加载中…" like a fresh page load.
       if(tab==='accounts'){void listAccounts({silent:pool.loaded});void listCredentials();void loadProxy();}
-      else if(tab==='settings')void loadProxy();
+      else if(tab==='settings'){void loadProxy();void loadAccountRecovery();}
       else if(tab==='api')void loadUserKeys({silent:userKeysLoaded});
       else if(tab==='advanced')void refreshPools({silent:poolsLoaded});
       else if(tab==='image'){void loadImagesFolder();void loadImagePreferences();void loadImageModels();void loadGifCapability();}
@@ -834,6 +848,22 @@ function createChatGPT2APIDashboard(React, STYLES, options = {}) {
       try{setCredentialText(await file.text());setCredentialFeedback(null);setCredentialError('')}
       catch{setCredentialError('文本文件读取失败')}
     }
+    async function loadAccountRecovery(){
+      setAccountRecovery(x=>({...x,busy:true,error:'',message:''}));
+      try{
+        const result=await upstream('/local/account-recovery',{timeoutMs:15000});
+        if(typeof result.autoRecover!=='boolean')throw Error('恢复设置响应无效');
+        setAccountRecovery(x=>({...x,autoRecover:result.autoRecover,loaded:true,busy:false}));
+      }catch(e){setAccountRecovery(x=>({...x,busy:false,error:'读取恢复设置失败：'+shortError(e)}))}
+    }
+    async function saveAccountRecovery(){
+      setAccountRecovery(x=>({...x,busy:true,error:'',message:''}));
+      try{
+        const result=await upstream('/local/account-recovery',{method:'POST',body:{autoRecover:accountRecovery.autoRecover},timeoutMs:20000});
+        if(typeof result.autoRecover!=='boolean')throw Error('恢复设置响应无效');
+        setAccountRecovery(x=>({...x,autoRecover:result.autoRecover,loaded:true,busy:false,message:'恢复设置已保存，异常账号将保留在号池中。'}));
+      }catch(e){setAccountRecovery(x=>({...x,busy:false,error:shortError(e)}))}
+    }
     async function loadProxy(){
       try{
         const result=await upstream('/local/proxy',{timeoutMs:15000});
@@ -866,6 +896,18 @@ function createChatGPT2APIDashboard(React, STYLES, options = {}) {
       if(!count)return;
       if(typeof globalThis.confirm==='function'&&!globalThis.confirm(`确定刷新全部 ${count} 个账号的额度？这会向上游发起网络请求。`))return;
       await startQuotaTask();
+    }
+    async function refreshSelectedAccounts(){
+      if(panelStore.get('doing')||!selectedAccountRefs.length||selectedAccountRefs.length>200)return;
+      if(!globalThis.confirm?.(`确定刷新已选的 ${selectedAccountRefs.length} 个账号的额度？包含其他分页及当前筛选外勾选的账号。这会向上游发起网络请求。`))return;
+      await startQuotaTask({refs:[...selectedAccountRefs]});
+    }
+    async function reloginSelectedAccounts(){
+      if(panelStore.get('doing')||!selectedAccountRefs.length||selectedAccountRefs.length>200)return;
+      if(!globalThis.confirm?.(`确定重新登录已选的 ${selectedAccountRefs.length} 个账号？包含其他分页及当前筛选外勾选的账号。将使用已保存的登录资料更新凭证，缺少资料的账号会跳过。`))return;
+      setDoing(true);setPool(x=>({...x,error:'',message:'正在提交重新登录任务…'}));
+      try{const task=await submitTask('relogin',{refs:[...selectedAccountRefs]});setReloginTaskId(task.id);setPool(x=>({...x,message:'重新登录任务已提交，可在历史任务中查看进度。'}))}
+      catch(e){setPool(x=>({...x,error:shortError(e)}));setDoing(false)}
     }
     async function addAccount(){
       const token=newToken.trim();if(!token){setPool(x=>({...x,error:'请填写你有权使用的账号 access_token'}));return}
@@ -1075,8 +1117,10 @@ function createChatGPT2APIDashboard(React, STYLES, options = {}) {
             h(Card,{title:`可用 Token 号池（${pool.items.length}）`,actions:h('div',{className:'c2a-card-actions'},
               h('label',{className:'c2a-account-filter'},'账号状态',h('select',{'aria-label':'账号状态',value:accountStatusFilter,disabled:doing||pool.loading,onChange:e=>{setAccountStatusFilter(e.target.value);changeAccountPage(1)}},h('option',{value:''},'全部状态'),...accountStatuses.map(status=>h('option',{key:status,value:status},status)))),
               h(Btn,{onClick:deleteSelectedAccounts,danger:true,disabled:doing||pool.loading||!selectedAccountRefs.length},`批量删除（${selectedAccountRefs.length}）`),
-              h(Btn,{onClick:refreshAllAccounts,disabled:doing||!pool.items.length},doing?'正在刷新…':'刷新全部额度'))},
-              selectedAccountRefs.length?h('div',{className:'c2a-selection-bar'},h('span',{role:'status'},`已选 ${selectedAccountRefs.length} 个账号（跨页、跨筛选保留）`),h(Btn,{onClick:()=>setAccountSelection([]),disabled:doing||pool.loading},'清空选择')):null,
+              h(Btn,{onClick:refreshSelectedAccounts,disabled:doing||pool.loading||!selectedAccountRefs.length||selectedAccountRefs.length>200},`刷新选中（${selectedAccountRefs.length}）`),
+              h(Btn,{onClick:reloginSelectedAccounts,disabled:doing||pool.loading||!selectedAccountRefs.length||selectedAccountRefs.length>200},`重新登录选中（${selectedAccountRefs.length}）`),
+              h(Btn,{onClick:refreshAllAccounts,disabled:doing||!pool.items.length},'刷新全部额度'))},
+              selectedAccountRefs.length?h('div',{className:'c2a-selection-bar'},h('span',{role:'status'},`已选 ${selectedAccountRefs.length} 个账号（跨页、跨筛选保留）`+(selectedAccountRefs.length>200?'；刷新和重新登录单次最多 200 个，请减少选择。':'')),h(Btn,{onClick:()=>setAccountSelection([]),disabled:doing||pool.loading},'清空选择')):null,
               filteredAccounts.length?h('div',{className:'c2a-tablewrap c2a-account-tablewrap'},h('table',{className:'c2a-table'},h('thead',null,h('tr',null,
                 h('th',{className:'c2a-checkcell'},h('input',{type:'checkbox',checked:allPageAccountsSelected,ref:node=>{if(node)node.indeterminate=!allPageAccountsSelected&&somePageAccountsSelected},'aria-checked':!allPageAccountsSelected&&somePageAccountsSelected?'mixed':allPageAccountsSelected,'aria-label':'选择本页全部账号',title:'仅选择或取消选择当前页',disabled:doing||pool.loading||!visibleAccountRefs.length,onChange:e=>selectAccountPage(e.target.checked)})),
                 ...['账号','类型','状态','剩余额度','操作'].map(t=>h('th',{key:t},t)))),h('tbody',null,...visibleAccounts.map((a,i)=>h('tr',{key:accountToken(a)||i,className:selectedAccountSet.has(accountToken(a))?'c2a-row-selected':''},
@@ -1460,6 +1504,17 @@ function createChatGPT2APIDashboard(React, STYLES, options = {}) {
           )
         ):
         h('div',{className:'c2a-settings'},
+          h(Card,{title:'账号凭证恢复'},
+            h('p',{className:'c2a-help'},'异常和限流账号保留在号池中，凭证失效时标记异常。优先使用 Refresh Token 自动续期；失效后，使用已保存的邮箱、密码和二次验证资料尝试恢复。'),
+            h('div',{className:'c2a-formrow'},
+              h('label',null,h('input',{type:'checkbox',checked:accountRecovery.autoRecover,disabled:accountRecovery.busy||!accountRecovery.loaded,'aria-label':'自动恢复账号凭证',onChange:e=>setAccountRecovery(x=>({...x,autoRecover:e.target.checked,message:''}))}),'自动恢复账号凭证'),
+              h(Btn,{onClick:saveAccountRecovery,disabled:accountRecovery.busy||!accountRecovery.loaded,primary:true},'保存恢复设置'),
+              h(Btn,{onClick:loadAccountRecovery,disabled:accountRecovery.busy},'读取恢复设置')
+            ),
+            h('p',{className:'c2a-help'},'恢复失败时保留异常账号，间隔一段时间后再试。缺少登录资料，或需要邮箱验证码、人工验证时，请手动重新登录并更新凭证。'),
+            accountRecovery.error?h('p',{className:'c2a-alert',role:'alert'},accountRecovery.error):null,
+            accountRecovery.message?h('p',{className:'c2a-info',role:'status'},accountRecovery.message):null
+          ),
           h(Card,{title:'跨平台 无 Docker 运行方式'},
             h('p',{className:'c2a-help'},'程序优先复用系统 Python 3.13，依赖安装在隔离环境；未检测到可用 Python 时自动下载托管环境。账号数据保留在本机数据目录。'),
             h('div',{className:'c2a-info'},'支持 Windows、macOS 或 Linux（x64/ARM64）。优先复用系统已有环境以节省下载流量与磁盘占用。不会自动获取账号或绕过任何上游额度限制。'),

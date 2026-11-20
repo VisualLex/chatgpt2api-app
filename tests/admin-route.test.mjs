@@ -18,7 +18,7 @@ const fetcher=async (url,opts)=>{
   let data;
   if(route==='/api/accounts'&&opts.method==='GET')data={items:[{access_token:TOKEN,refresh_token:'refreshsecret',id_token:'idsecret',email:'a@example.com',status:'normal',type:'plus',quota:10}]};
   else if(route==='/api/accounts'&&opts.method==='DELETE')data={removed:1,items:[]};
-  else if(route==='/api/accounts/refresh')data={progress_id:'progress123',items:[]};
+  else if(route==='/api/accounts/refresh')data={progress_id:'12345678-1234-1234-1234-123456789abc',items:[]};
   else if(route==='/api/accounts'&&opts.method==='POST')data={added:1,skipped:0,items:[{access_token:TOKEN}],errors:['oops with '+TOKEN]};
   else if(route==='/api/auth/users'&&opts.method==='GET')data={items:[{id:'abcdef012345',name:'Cherry Studio',enabled:true,created_at:'2026-11-04',key_hash:'secret-hash'}]};
   else if(route==='/api/auth/users'&&opts.method==='POST')data={key:'userkey123456',items:[{id:'abcdef012345',name:'Cherry Studio',enabled:true}]};
@@ -74,7 +74,7 @@ test('account deletion and refresh use opaque reference resolved by Host only',a
   const lastDelete=calls.filter(x=>x.method==='DELETE').at(-1);
   assert.equal(lastDelete.body.tokens[0],TOKEN);
   const refresh=await call({path:'/api/accounts/refresh',method:'POST',body:{access_tokens:[ref]}});
-  assert.equal(refresh.body.progress_id,'progress123');
+  assert.equal(refresh.body.progress_id,'12345678-1234-1234-1234-123456789abc');
 });
 test('batch deletion resolves all opaque references once, deduplicates, and strips private upstream fields',async()=>{
   const fixture=accountDeletionFixture();
@@ -453,6 +453,35 @@ test('zero-quota proxy controls do not expose other settings or credentials',asy
   await assert.rejects(()=>handler.execute({path:'/api/accounts/refresh/progress/not-a-uuid'}));
 });
 
+test('account recovery controls retain accounts and expose only the recovery switch',async()=>{
+  let autoRecover=false;
+  const observed=[];
+  const handler=createAdminHandler({baseUrl:'http://127.0.0.1:38650',secret:SECRET,fetcher:async(url,opts)=>{
+    assert.equal(new URL(url).pathname,'/api/settings');
+    assert.equal(opts.headers.Authorization,`Bearer ${SECRET}`);
+    if(opts.method==='POST'){
+      const body=JSON.parse(opts.body);observed.push(body);
+      autoRecover=body.auto_relogin_after_refresh;
+    }
+    return Response.json({config:{auto_relogin_after_refresh:autoRecover,auto_remove_invalid_accounts:true,'auth-key':SECRET,password:'hidden'}});
+  }});
+  assert.deepEqual(await handler.execute({path:'/local/account-recovery'}),{autoRecover:false});
+  for(const enabled of [true,false]){
+    const saved=await handler.execute({path:'/local/account-recovery',method:'POST',body:{autoRecover:enabled}});
+    assert.deepEqual(saved,{autoRecover:enabled});
+    assert.deepEqual(observed.at(-1),{auto_remove_invalid_accounts:false,auto_remove_rate_limited_accounts:false,auto_relogin_after_refresh:enabled});
+    assert.deepEqual(await handler.execute({path:'/local/account-recovery'}),saved);
+  }
+});
+
+test('account recovery controls reject invalid settings before calling upstream',async()=>{
+  const handler=createAdminHandler({baseUrl:'http://127.0.0.1:38650',secret:SECRET,fetcher:async()=>assert.fail('invalid settings must not reach upstream')});
+  for(const body of [undefined,null,[],{}, {autoRecover:'true'}, {autoRecover:1}, {autoRecover:true,'auth-key':'injected'}, {autoRecover:false,auto_remove_invalid_accounts:true}]){
+    await assert.rejects(()=>handler.execute({path:'/local/account-recovery',method:'POST',body}),error=>error.status===400);
+  }
+  await assert.rejects(()=>handler.execute({path:'/local/account-recovery',method:'DELETE'}),error=>error.status===405);
+});
+
 test('proxy URLs with credentials are not returned to the browser',async()=>{
   const handler=createAdminHandler({
     baseUrl:'http://127.0.0.1:38650',secret:SECRET,
@@ -677,6 +706,134 @@ test('quota submissions with untrackable progress become interrupted without aut
   }});
   const {task}=await submitHistory(handler,'quota',{},'history-quota-unknown');await taskHistory.waitForIdle();
   assert.equal(taskHistory.get(task.id).status,'interrupted');assert.equal(submissions,1);
+});
+
+function selectedAccountsFixture(t,{progress,accounts,fetcher}={}){
+  const items=accounts||[
+    {access_token:'private-selected-abnormal',status:'abnormal'},
+    {access_token:'private-selected-disabled',status:'disabled'},
+    {access_token:'private-unselected-normal',status:'normal'}
+  ];
+  const observed=[],progressId='12345678-1234-1234-1234-123456789abc';
+  const fixture=historyFixture(t,{fetcher:async(url,options)=>{
+    const route=new URL(url).pathname;
+    observed.push({path:route,method:options.method,body:options.body&&JSON.parse(options.body)});
+    if(fetcher){const response=await fetcher(route,options);if(response)return response;}
+    if(route==='/api/accounts')return Response.json({items});
+    if(route==='/api/accounts/refresh'||route==='/api/accounts/re-login')return Response.json({progress_id:progressId});
+    if(route.endsWith('/progress/'+progressId))return Response.json(progress||{done:true,total:2,processed:2,result:{refreshed:2,errors:[]}});
+    assert.fail('Unexpected upstream route '+route);
+  }});
+  return {...fixture,items,observed,progressId,refs:async()=>{
+    const response=await fixture.handler.execute({path:'/api/accounts'});
+    observed.length=0;return response.items.map(item=>item.ref);
+  }};
+}
+
+test('selected quota history refreshes only abnormal and disabled references, deduplicated once per snapshot',async t=>{
+  const fixture=selectedAccountsFixture(t),refs=await fixture.refs();
+  const {task}=await submitHistory(fixture.handler,'quota',{refs:[refs[0],refs[1],refs[0]]},'selected-quota-precise');
+  await fixture.taskHistory.waitForIdle();
+  const completed=fixture.taskHistory.get(task.id);
+  assert.deepEqual(completed.params,{refs:refs.slice(0,2)});assert.equal(completed.status,'succeeded');
+  const posts=fixture.observed.filter(item=>item.method==='POST');assert.equal(posts.length,1);
+  assert.deepEqual(posts[0].body,{access_tokens:fixture.items.slice(0,2).map(item=>item.access_token)});
+  assert.equal(fixture.observed.filter(item=>item.path==='/api/accounts').length,2,'submit and queued start each resolve the complete set once');
+  assert.doesNotMatch(fs.readFileSync(fixture.taskHistory.filePath,'utf8'),/private-selected|private-unselected|access_tokens/);
+});
+
+test('selected account task and bridge routes reject invalid batches before any upstream request',async t=>{
+  const fixture=selectedAccountsFixture(t),refs=await fixture.refs();
+  const invalid=[undefined,null,[],refs[0],[refs[0],null],[refs[0],{}],[refs[0],'raw-token'],Array(201).fill(refs[0])];
+  let id=0;
+  for(const type of ['quota','relogin'])for(const value of invalid){
+    await assert.rejects(()=>submitHistory(fixture.handler,type,{refs:value},'invalid-selected-'+id++),error=>error.status===400);
+  }
+  await assert.rejects(()=>submitHistory(fixture.handler,'quota',{ref:refs[0],refs:[refs[1]]},'mixed-selected-refs'),error=>error.status===400);
+  await assert.rejects(()=>submitHistory(fixture.handler,'relogin',{},'missing-relogin-refs'),error=>error.status===400);
+  for(const route of ['/api/accounts/refresh','/api/accounts/re-login'])for(const value of invalid){
+    await assert.rejects(()=>fixture.handler.execute({path:route,method:'POST',body:{access_tokens:value}}),error=>error.status===400);
+  }
+  assert.equal(fixture.observed.length,0);assert.equal(fixture.taskHistory.list().total,0);
+  for(const type of ['quota','relogin']){
+    await assert.rejects(()=>submitHistory(fixture.handler,type,{refs:[refs[0],'0'.repeat(64)]},'stale-selected-'+type),error=>error.status===404);
+  }
+  assert.equal(fixture.observed.filter(item=>item.method==='POST').length,0);assert.equal(fixture.taskHistory.list().total,0);
+});
+
+test('selected account bridges allow 200 references and resolve the entire set before one mutation',async t=>{
+  const fixture=selectedAccountsFixture(t,{accounts:Array.from({length:200},(_,i)=>({access_token:'private-batch-'+i}))});
+  const refs=await fixture.refs();
+  for(const route of ['/api/accounts/refresh','/api/accounts/re-login']){
+    const job=await fixture.handler.execute({path:route,method:'POST',body:{access_tokens:refs}});
+    assert.equal(job.total,200);assert.equal(job.progress_id,fixture.progressId);
+    const posts=fixture.observed.filter(item=>item.path===route);assert.equal(posts.length,1);
+    assert.deepEqual(posts[0].body.access_tokens,fixture.items.map(item=>item.access_token));
+  }
+  assert.equal(fixture.observed.filter(item=>item.path==='/api/accounts').length,2);
+});
+
+test('selected account bridges strip invalid upstream progress IDs and reject arbitrary progress paths',async t=>{
+  const fixture=selectedAccountsFixture(t,{fetcher:async route=>route==='/api/accounts/re-login'?Response.json({progress_id:TOKEN,password:'private-password'}):null});
+  const refs=await fixture.refs();
+  const job=await fixture.handler.execute({path:'/api/accounts/re-login',method:'POST',body:{access_tokens:refs}});
+  assert.equal(job.progress_id,null);assert.doesNotMatch(JSON.stringify(job),/upstream_access_token|private-password/);
+  fixture.observed.length=0;
+  for(const route of ['/api/accounts/re-login/progress/not-a-uuid','/api/accounts/re-login/progress/'+ '-'.repeat(36),'/api/accounts/re-login/progress/'+fixture.progressId+'?private=1']){
+    await assert.rejects(()=>fixture.handler.execute({path:route}),error=>error.status===404);
+  }
+  assert.equal(fixture.observed.length,0);
+});
+
+test('relogin history records truthful sanitized success failure and skipped counts',async t=>{
+  const fixture=selectedAccountsFixture(t,{progress:{done:true,total:3,processed:3,results:[
+    {token:'private-token-summary',status:'成功'},
+    {token:'private-token-summary',status:'禁用',error:'account_deactivated'},
+    {token:'private-token-summary',status:'跳过',error:'private-password upstream_access_token '+SECRET}
+  ],result:{items:[{password:'private-password'}]}}});
+  const refs=await fixture.refs();
+  const {task}=await submitHistory(fixture.handler,'relogin',{refs},'selected-relogin-partial');
+  await fixture.taskHistory.waitForIdle();
+  const completed=fixture.taskHistory.get(task.id);
+  assert.equal(completed.status,'partial');
+  assert.deepEqual([completed.result.total,completed.result.processed,completed.result.succeeded,completed.result.failed,completed.result.skipped],[3,3,1,1,1]);
+  assert.match(JSON.stringify(completed.result.errors),/删除或停用/);
+  assert.equal(completed.progress.progressId,fixture.progressId);
+  assert.deepEqual(fixture.observed.find(item=>item.path==='/api/accounts/re-login').body,{access_tokens:fixture.items.map(item=>item.access_token)});
+  assert.doesNotMatch(fs.readFileSync(fixture.taskHistory.filePath,'utf8'),/private-token|private-password|upstream_access_token|host-private-secret|private-selected|private-unselected|token/);
+  assert.equal((await fixture.handler.execute({path:'/local/tasks?type=relogin'})).total,1);
+});
+
+test('relogin terminal results never call skipped or incomplete accounts successful',async t=>{
+  for(const [label,progress,expected] of [
+    ['success',{done:true,total:2,processed:2,results:[{status:'成功'},{status:'成功'}]},'succeeded'],
+    ['failed',{done:true,total:2,processed:2,results:[{status:'异常',error:'private failure'},{status:'禁用',error:'account_deactivated'}]},'failed'],
+    ['skipped',{done:true,total:2,processed:2,results:[{status:'跳过'},{status:'跳过'}]},'failed'],
+    ['incomplete',{done:true,total:2,processed:1,results:[{status:'成功'}]},'interrupted'],
+    ['queued-summary',{done:true,total:2,processed:2,result:{relogined:2}},'interrupted'],
+    ['error',{done:true,total:2,processed:0,error:'raw private failure'},'failed']
+  ])await t.test(label,async t=>{
+    const fixture=selectedAccountsFixture(t,{progress}),refs=(await fixture.refs()).slice(0,2);
+    const {task}=await submitHistory(fixture.handler,'relogin',{refs},'selected-relogin-'+label);
+    await fixture.taskHistory.waitForIdle();assert.equal(fixture.taskHistory.get(task.id).status,expected);
+    assert.doesNotMatch(fs.readFileSync(fixture.taskHistory.filePath,'utf8'),/raw private failure|private failure/);
+  });
+});
+
+test('queued selected account tasks and explicit retries cannot replay stale references or refresh every account',async t=>{
+  for(const type of ['quota','relogin'])await t.test(type,async t=>{
+    const fixture=selectedAccountsFixture(t),refs=await fixture.refs();
+    let release,started;
+    const active=new Promise(resolve=>{started=resolve});
+    fixture.taskHistory.submit({type:'image',summary:'occupy runner',params:{},requestId:'hold-task-'+type,requestHash:'a'.repeat(64)},async()=>{started();await new Promise(resolve=>{release=resolve});return {status:'succeeded'}});
+    await active;
+    const {task}=await submitHistory(fixture.handler,type,{refs:refs.slice(0,2)},'queued-selected-'+type);
+    fixture.items[0].access_token='private-rotated-credential';
+    release();await fixture.taskHistory.waitForIdle();
+    const completed=fixture.taskHistory.get(task.id);assert.equal(completed.status,'failed');assert.match(completed.error,/账号已改变.*刷新账号列表/);
+    await assert.rejects(()=>fixture.handler.execute({path:'/local/tasks/'+task.id+'/retry',method:'POST',body:{requestId:'retry-selected-'+type}}),error=>error.status===404&&/刷新账号列表/.test(error.message));
+    assert.equal(fixture.observed.filter(item=>item.method==='POST').length,0);
+  });
 });
 
 test('history routes filter and paginate summaries, reject invalid input, and never forward arbitrary file paths',async t=>{

@@ -121,7 +121,7 @@ def login_with_password_and_totp(email: str, password: str, totp_secret: str = "
     platform_oauth_redirect_uri = "https://platform.openai.com/auth/callback"
     user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"
 
-    session_kwargs = {"impersonate": "chrome110", "verify": False}
+    session_kwargs = {"impersonate": "chrome110", "verify": True}
     proxy_url = resolve_proxy(proxy)
     if proxy_url:
         session_kwargs["proxy"] = proxy_url

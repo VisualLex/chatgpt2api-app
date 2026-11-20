@@ -116,6 +116,10 @@ for(const [platform,arch,libc] of cases){
     assert.deepEqual(launches[0].args.slice(-4),['127.0.0.1','--port','38650','--no-access-log']);
     assert.equal(launches[0].opts.env.STORAGE_BACKEND,'sqlite');
     assert.equal(launches[0].opts.env.DSH_API_HISTORY_DIR,path.join(root,'api-request-history'));
+    assert.equal(launches[0].opts.env.DSH_ACCOUNT_RECOVERY_WORKER,path.join(root,'source','dsh_auth_worker.py'));
+    for(const file of ['dsh_account_recovery.py','dsh_auth_worker.py']){
+      assert.ok(fs.existsSync(path.join(root,'source',file)),`installs ${file} beside the backend entrypoint`);
+    }
     assert.equal(launches[0].opts.env.CHATGPT2API_AUTH_KEY,ensureManagedFiles(backend.paths));
     assert.equal(fs.readFileSync(backend.paths.marker,'utf8').trim(),SOURCE_COMMIT);
     await backend.stop();

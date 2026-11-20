@@ -75,13 +75,16 @@ function setPageSize(ui,size){
   const select=ui.find(ui.render(),node=>node.type==='select'&&node.props['aria-label']==='每页账号数');
   assert.ok(select);select.props.onChange({target:{value:String(size)}});return ui.render();
 }
-async function poolFixture(count,{confirm=()=>true,deleteBatch,readAccounts}={}){
+async function poolFixture(count,{confirm=()=>true,deleteBatch,readAccounts,handle}={}){
   let items=Array.from({length:count},(_,i)=>({ref:String(i+1).padStart(64,'0'),email:`account${i+1}@example.test`,type:'free',status:'normal',quota:10}));
   const requests=[],confirmations=[];
-  const ui=loadPanel({confirm:message=>{confirmations.push(message);return confirm(message)},fetch:async(_url,options)=>{
+  const ui=loadPanel({setInterval:()=>1,clearInterval:()=>{},crypto:{randomUUID:()=>TASK_ID},confirm:message=>{confirmations.push(message);return confirm(message)},fetch:async(_url,options)=>{
     const request=JSON.parse(options.body);requests.push(request);
+    const handled=await handle?.(request);
+    if(handled!==undefined)return handled instanceof Response?handled:Response.json(handled);
     if(request.path==='/local/credential-vault')return Response.json({items:[]});
     if(request.path==='/local/proxy')return Response.json({url:'',configured:false});
+    if(request.path==='/health?format=json')return Response.json({healthy:true,accounts:{total:items.length}});
     if(request.path!=='/api/accounts')throw Error('Unexpected request: '+request.path);
     if(request.method==='DELETE'){
       const override=await deleteBatch?.(request,requests.filter(r=>r.method==='DELETE').length);
@@ -378,7 +381,7 @@ test('overview quota refresh submits the existing task before visiting accounts 
   assert.equal(confirmations.length,1);
   assert.match(confirmations[0],/全部 23 个账号/);
   assert.equal(findButton(ui,'刷新中…').props.disabled,true);
-  const polling=ui.effects().find(entry=>entry.deps?.length===3&&entry.deps[2]===TASK_ID);
+  const polling=ui.effects().find(entry=>entry.deps?.length===4&&entry.deps[2]===TASK_ID);
   assert.ok(polling,'quota refresh uses the existing background task tracker');
   const cleanup=polling.fn();await flushPanel();cleanup?.();
   await loadOverviewHealth(ui);
@@ -763,6 +766,112 @@ test('selection spans pages and page select-all only affects the visible page',a
   assert.equal(findButton(ui,'批量删除（0）').props.disabled,true);
 });
 
+test('selected account actions submit only the cross-page and cross-filter selection and reject duplicate clicks',async()=>{
+  for(const [label,type] of [['刷新选中','quota'],['重新登录选中','relogin']]){
+    let release;
+    const {ui,requests,confirmations,replaceItems}=await poolFixture(25,{handle:request=>request.path==='/local/tasks'&&request.method==='POST'?new Promise(resolve=>{release=()=>resolve({task:taskRecord({type,status:'queued'})})}):undefined});
+    const empty=findButton(ui,label+'（0）');
+    assert.equal(empty.props.disabled,true);await empty.props.onClick();
+    assert.equal(confirmations.length,0,'an empty selection does not ask for confirmation or submit');
+    replaceItems(Array.from({length:25},(_,i)=>({ref:String(i+1).padStart(64,'0'),email:`account${i+1}@example.test`,status:i<10?'normal':'disabled',quota:10})));
+    clickButton(ui,'刷新账号列表');await flushPanel();
+    setCheckbox(ui,'选择账号 account1@example.test');
+    clickButton(ui,'下一页');setCheckbox(ui,'选择账号 account11@example.test');
+    setTaskField(ui,'账号状态','disabled');setCheckbox(ui,'选择账号 account12@example.test');
+    const action=findButton(ui,label+'（3）');
+    const first=action.props.onClick(),second=action.props.onClick();
+    assert.equal(findButton(ui,label+'（3）').props.disabled,true);
+    assert.equal(findButton(ui,(type==='quota'?'重新登录选中':'刷新选中')+'（3）').props.disabled,true);
+    release();await Promise.all([first,second]);
+    const submitted=requests.filter(request=>request.path==='/local/tasks'&&request.method==='POST');
+    assert.equal(submitted.length,1);assert.equal(submitted[0].body.type,type);
+    assert.deepEqual(submitted[0].body.params,{refs:[1,11,12].map(n=>String(n).padStart(64,'0'))});
+    assert.equal(confirmations.length,1);assert.match(confirmations[0],/已选.*3 个账号/);
+    assert.match(confirmations[0],/其他分页|跨页/);
+    assert.match(confirmations[0],/筛选/);
+  }
+});
+
+test('selected account actions handle cancellation, submission failure, and the 200-account limit',async()=>{
+  for(const label of ['刷新选中','重新登录选中']){
+    for(const confirmed of [false,true]){
+      const {ui,requests}=await poolFixture(1,{confirm:()=>confirmed,handle:request=>{if(request.path==='/local/tasks')throw Error('选中账号任务提交失败')}});
+      setCheckbox(ui,'选择本页全部账号');await findButton(ui,label+'（1）').props.onClick();
+      assert.equal(requests.filter(request=>request.method==='POST').length,confirmed?1:0);
+      assert.equal(findButton(ui,label+'（1）').props.disabled,false);
+      if(confirmed)assert.match(ui.text(ui.render()),/选中账号任务提交失败/);
+    }
+  }
+  const {ui,requests}=await poolFixture(201);setPageSize(ui,100);
+  setCheckbox(ui,'选择本页全部账号');clickButton(ui,'下一页');setCheckbox(ui,'选择本页全部账号');
+  clickButton(ui,'下一页');setCheckbox(ui,'选择本页全部账号');
+  for(const label of ['刷新选中','重新登录选中']){
+    const action=findButton(ui,label+'（201）');assert.equal(action.props.disabled,true);await action.props.onClick();
+  }
+  assert.match(ui.text(ui.render()),/单次最多.*200/);
+  assert.equal(requests.filter(request=>request.method==='POST').length,0);
+});
+
+test('selected re-login completion refreshes accounts and health and reports partial or skipped results accurately',async()=>{
+  for(const result of [{total:2,processed:2,succeeded:1,failed:1,skipped:0},{total:2,processed:2,succeeded:0,failed:0,skipped:2}]){
+    let taskReads=0;
+    const {ui,requests,replaceItems}=await poolFixture(2,{handle:request=>{
+      if(request.path==='/local/tasks')return {task:taskRecord({type:'relogin',status:'queued'})};
+      if(request.path==='/local/tasks/'+TASK_ID){taskReads++;return {task:taskRecord({type:'relogin',status:result.failed?'partial':'failed',result:{...result,errors:[{error:result.failed?'账号已停用':'缺少可用登录资料'}]}})}}
+    }});
+    setCheckbox(ui,'选择本页全部账号');await findButton(ui,'重新登录选中（2）').props.onClick();
+    replaceItems([{ref:'rotated-account-ref',email:'account1@example.test',status:'normal'},{ref:'2'.padStart(64,'0'),email:'account2@example.test',status:'disabled'}]);
+    ui.render();
+    const polling=ui.effects().find(entry=>entry.deps?.includes(TASK_ID));
+    assert.ok(polling,'re-login has a background task tracker');const cleanup=polling.fn();await flushPanel();cleanup?.();
+    assert.equal(taskReads,1);
+    assert.equal(requests.filter(request=>request.path==='/api/accounts').length,2,'completion reloads the pool');
+    await loadOverviewHealth(ui);
+    assert.equal(requests.filter(request=>request.path==='/health?format=json').length,1,'completion requests an updated health summary');
+    assert.ok(findButton(ui,'重新登录选中（1）'),'rotated references are reconciled while unchanged selections remain');
+    const text=ui.text(ui.render());
+    assert.match(text,new RegExp(`成功 ${result.succeeded}.*失败 ${result.failed}.*跳过 ${result.skipped}`));
+    assert.match(text,result.failed?/部分成功/:/失败|未完成/);
+    assert.match(text,result.failed?/账号已停用/:/缺少可用登录资料/);
+    assert.equal(findButton(ui,'重新登录选中（1）').props.disabled,false);
+  }
+});
+
+test('an active re-login task is restored and keeps selected account actions busy while showing progress',async()=>{
+  const running=taskRecord({type:'relogin',status:'running',result:null,progress:{total:2,processed:1,succeeded:1,failed:0,skipped:0}});
+  const {ui,requests}=await poolFixture(2,{handle:request=>{
+    if(request.path.startsWith('/local/tasks?status='))return {items:request.path.includes('status=running')?[running]:[]};
+    if(request.path==='/local/tasks/'+TASK_ID)return {task:running};
+  }});
+  setCheckbox(ui,'选择本页全部账号');
+  const restore=ui.effects().find(entry=>entry.deps?.length===0&&entry.fn.toString().includes('restoreActiveTasks'));
+  assert.ok(restore);restore.fn();await flushPanel();
+  assert.equal(findButton(ui,'刷新选中（2）').props.disabled,true);
+  assert.equal(findButton(ui,'重新登录选中（2）').props.disabled,true);
+  const polling=ui.effects().find(entry=>entry.deps?.[3]===TASK_ID);
+  assert.ok(polling);const cleanup=polling.fn();await flushPanel();cleanup?.();
+  assert.match(ui.text(ui.render()),/重新登录进行中：1 \/ 2.*成功 1/);
+  assert.equal(requests.filter(request=>request.method==='POST').length,0,'restoring a task never submits another login');
+});
+
+test('re-login history shows its type, progress, safe reasons, and tracks retries as re-login tasks',async()=>{
+  const task=taskRecord({type:'relogin',summary:'重新登录 2 个账号',status:'partial',params:{refs:['ref-one','ref-two']},progress:{total:2,processed:2,succeeded:1,failed:1,skipped:0},result:{total:2,processed:2,succeeded:1,failed:1,skipped:0,errors:[{error:'账号已停用'}]}});
+  const {ui,requests}=overviewFixture(request=>{
+    if(request.path.startsWith('/local/tasks?'))return {items:[task],total:1,page:1,pageSize:10,pageCount:1};
+    if(request.path==='/local/tasks/'+TASK_ID)return {task};
+    if(request.path==='/local/tasks/'+TASK_ID+'/retry')return {task:taskRecord({type:'relogin',status:'queued'})};
+  },undefined,()=>true);
+  await showTaskHistory(ui);setTaskField(ui,'任务类型','relogin');await runHistoryEffect(ui);
+  assert.equal(new URL(requests.at(-1).path,'http://localhost').searchParams.get('type'),'relogin');
+  await findButton(ui,'详情').props.onClick();await flushPanel();
+  let detail=dialog(ui);assert.match(ui.text(detail),/重新登录/);assert.match(ui.text(detail),/成功 1.*失败 1.*跳过 0/);
+  assert.match(ui.text(detail),/账号已停用/);assert.doesNotMatch(ui.text(detail),/undefined|第 undefined 行/);
+  assert.ok(ui.find(detail,node=>node.type==='progress'&&node.props['aria-label']==='账号重新登录进度'));
+  await findButton(ui,'创建重试任务',detail).props.onClick();
+  ui.render();assert.ok(ui.effects().some(entry=>entry.deps?.[3]===TASK_ID&&entry.deps[2]===''),'history retries use the re-login task tracker');
+  clickButton(ui,'号池管理');assert.equal(findButton(ui,'重新登录选中（0）').props.disabled,true);
+});
+
 test('cancelled batch deletion leaves accounts and selections unchanged',async()=>{
   const {ui,requests,confirmations}=await poolFixture(12,{confirm:()=>false});
   setCheckbox(ui,'选择本页全部账号');
@@ -923,6 +1032,38 @@ test('image failures explain upstream content policy instead of echoing the apol
   assert.doesNotMatch(DEFAULT_PROMPT,/写真|真人|性感/);
 });
 
+
+test('account recovery settings load the saved switch and preserve the draft on save failure',async()=>{
+  const requests=[];let failSave=false;
+  const ui=loadPanel({fetch:async(_url,options)=>{
+    const request=JSON.parse(options.body);requests.push(request);
+    if(request.path==='/local/proxy')return Response.json({url:'',configured:false});
+    assert.equal(request.path,'/local/account-recovery');
+    if(request.method==='POST'&&failSave)return Response.json({error:'保存暂时失败'},{status:503});
+    return Response.json({autoRecover:request.method==='POST'?request.body.autoRecover:true});
+  }});
+  ui.mount();clickButton(ui,'插件设置');
+  assert.match(ui.text(ui.render()),/账号凭证恢复/);
+  assert.equal(findButton(ui,'保存恢复设置').props.disabled,true,'wait for the actual saved setting before allowing changes');
+  const effects=ui.effects().filter(entry=>entry.deps?.length===1&&entry.deps[0]==='settings');
+  assert.ok(effects.length,'opening settings registers page effects');
+  for(const effect of effects)effect.fn();
+  await flushPanel();
+  let checkbox=ui.find(ui.render(),node=>node.type==='input'&&node.props['aria-label']==='自动恢复账号凭证');
+  assert.equal(checkbox.props.checked,true);
+  assert.match(ui.text(ui.render()),/保留.*异常|异常.*保留/);
+  assert.match(ui.text(ui.render()),/二次验证/);
+  assert.match(ui.text(ui.render()),/邮箱验证码/);
+  setCheckbox(ui,'自动恢复账号凭证',false);
+  await findButton(ui,'保存恢复设置').props.onClick();
+  assert.deepEqual(JSON.parse(JSON.stringify(requests.at(-1))),{path:'/local/account-recovery',method:'POST',body:{autoRecover:false}});
+  assert.match(ui.text(ui.render()),/已保存/);
+  failSave=true;setCheckbox(ui,'自动恢复账号凭证',true);
+  await findButton(ui,'保存恢复设置').props.onClick();
+  checkbox=ui.find(ui.render(),node=>node.type==='input'&&node.props['aria-label']==='自动恢复账号凭证');
+  assert.equal(checkbox.props.checked,true);
+  assert.match(ui.text(ui.render()),/保存暂时失败/);
+});
 
 test('proxy and quota controls remain available in a dialog with generic guidance',()=>{
   const ui=loadPanel();ui.mount();clickButton(ui,'号池管理');
